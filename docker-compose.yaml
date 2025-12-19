@@ -1,0 +1,287 @@
+x-airflow-common:
+  &airflow-common
+  build: .
+  env_file:
+    - .env
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: '6r2pK5gLEUmyfZFev3MHGD3eOqlXiY3jZoZN4ggJHCk='
+    AIRFLOW__WEBSERVER__SECRET_KEY: '54c71d8c5cd1f363e7c35a1ca27dfc04d8715b290d8d276b1c75efcebe6f9526'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.session'
+
+    AIRFLOW_CONN_POSTGRES_SOURCE: >
+      postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+
+    AIRFLOW_CONN_MSSQL_TARGET: >
+      mssql+pyodbc://sa:${MSSQL_PASSWORD}@sqlserver:1433/?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes&database=DataWarehouse
+
+    # Hadoop HDFS connection
+    AIRFLOW_CONN_HDFS_DEFAULT: >
+      hdfs://namenode:9000
+
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./data:/opt/airflow/data
+    - hadoop-namenode:/hadoop/dfs/name
+    - hadoop-datanode:/hadoop/dfs/data
+  
+  user: "root"
+  entrypoint:
+    - /bin/bash
+    - -c
+    - |
+      chown -R airflow:root /opt/airflow/{logs,plugins,data}
+      exec /entrypoint "airflow"
+
+  depends_on:
+    postgres:
+      condition: service_healthy
+    namenode:
+      condition: service_healthy
+
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: airflow-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver
+    ports:
+      - "1450:1433"
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=${MSSQL_PASSWORD}
+      - MSSQL_PID=Developer
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+      - ./init.sql:/init.sql
+      - ./init-db.sh:/init-db.sh
+    healthcheck:
+      test: /opt/mssql-tools18/bin/sqlcmd -S 127.0.0.1 -U sa -P "${MSSQL_PASSWORD}" -C -Q "SELECT 1" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: always
+    
+  # Hadoop HDFS NameNode
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-namenode
+    hostname: namenode
+    restart: always
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hadoop-namenode:/hadoop/dfs/name
+    environment:
+      - CLUSTER_NAME=hadoop-cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - CORE_CONF_hadoop_proxyuser_hue_hosts=*
+      - CORE_CONF_hadoop_proxyuser_hue_groups=*
+      - CORE_CONF_io_compression_codecs=org.apache.hadoop.io.compress.SnappyCodec
+      - HDFS_CONF_dfs_webhdfs_enabled=true
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_nameservices=ClusterX
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Hadoop HDFS DataNode
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-datanode
+    hostname: datanode
+    restart: always
+    ports:
+      - "9864:9864"
+    volumes:
+      - hadoop-datanode:/hadoop/dfs/data
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      CORE_CONF_hadoop_http_staticuser_user: root
+      CORE_CONF_hadoop_proxyuser_hue_hosts: "*"
+      CORE_CONF_hadoop_proxyuser_hue_groups: "*"
+      CORE_CONF_io_compression_codecs: org.apache.hadoop.io.compress.SnappyCodec
+      HDFS_CONF_dfs_webhdfs_enabled: "true"
+      HDFS_CONF_dfs_permissions_enabled: "false"
+    depends_on:
+      - namenode
+
+  # Hadoop Resource Manager
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-resourcemanager
+    restart: always
+    ports:
+      - "8088:8088"
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864"
+      YARN_CONF_yarn_log___aggregation___enable: "true"
+      YARN_CONF_yarn_log_server_url: "http://historyserver:8188/applicationhistory/logs/"
+      YARN_CONF_yarn_resourcemanager_recovery_enabled: "true"
+      YARN_CONF_yarn_resourcemanager_store_class: "org.apache.hadoop.yarn.server.resourcemanager.recovery.FileSystemRMStateStore"
+      YARN_CONF_yarn_resourcemanager_scheduler_class: "org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler"
+      YARN_CONF_yarn_scheduler_capacity_root_default_maximum___allocation___mb: "8192"
+      YARN_CONF_yarn_scheduler_capacity_root_default_maximum___allocation___vcores: "4"
+      YARN_CONF_yarn_resourcemanager_fs_state___store_uri: "/rmstate"
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+      CORE_CONF_hadoop_http_staticuser_user: "root"
+      CORE_CONF_hadoop_proxyuser_hue_hosts: "*"
+      CORE_CONF_hadoop_proxyuser_hue_groups: "*"
+      CORE_CONF_io_compression_codecs: "org.apache.hadoop.io.compress.SnappyCodec"
+      HDFS_CONF_dfs_webhdfs_enabled: "true"
+      HDFS_CONF_dfs_permissions_enabled: "false"
+    depends_on:
+      - namenode
+      - datanode
+
+  # Hadoop Node Manager
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-nodemanager
+    restart: always
+    ports:
+      - "8042:8042"
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+      YARN_CONF_yarn_log___aggregation___enable: "true"
+      YARN_CONF_yarn_log_server_url: "http://historyserver:8188/applicationhistory/logs/"
+      YARN_CONF_yarn_resourcemanager_recovery_enabled: "true"
+      YARN_CONF_yarn_resourcemanager_store_class: "org.apache.hadoop.yarn.server.resourcemanager.recovery.FileSystemRMStateStore"
+      YARN_CONF_yarn_resourcemanager_scheduler_class: "org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler"
+      YARN_CONF_yarn_scheduler_capacity_root_default_maximum___allocation___mb: "8192"
+      YARN_CONF_yarn_scheduler_capacity_root_default_maximum___allocation___vcores: "4"
+      YARN_CONF_yarn_resourcemanager_fs_state___store_uri: "/rmstate"
+      YARN_CONF_yarn_resourcemanager_resource___tracker_address: "resourcemanager:8031"
+      YARN_CONF_yarn_resourcemanager_scheduler_address: "resourcemanager:8030"
+      YARN_CONF_yarn_resourcemanager_address: "resourcemanager:8032"
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+      CORE_CONF_hadoop_http_staticuser_user: "root"
+      CORE_CONF_hadoop_proxyuser_hue_hosts: "*"
+      CORE_CONF_hadoop_proxyuser_hue_groups: "*"
+      CORE_CONF_io_compression_codecs: "org.apache.hadoop.io.compress.SnappyCodec"
+      HDFS_CONF_dfs_webhdfs_enabled: "true"
+      HDFS_CONF_dfs_permissions_enabled: "false"
+    depends_on:
+      - namenode
+      - datanode
+      - resourcemanager
+
+  # Hadoop History Server
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-historyserver
+    restart: always
+    ports:
+      - "8188:8188"
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+      CORE_CONF_hadoop_http_staticuser_user: "root"
+      CORE_CONF_hadoop_proxyuser_hue_hosts: "*"
+      CORE_CONF_hadoop_proxyuser_hue_groups: "*"
+      CORE_CONF_io_compression_codecs: "org.apache.hadoop.io.compress.SnappyCodec"
+      HDFS_CONF_dfs_webhdfs_enabled: "true"
+      HDFS_CONF_dfs_permissions_enabled: "false"
+      YARN_CONF_yarn_log___aggregation___enable: "true"
+      YARN_CONF_yarn_log_server_url: "http://historyserver:8188/applicationhistory/logs/"
+      YARN_CONF_yarn_resourcemanager_recovery_enabled: "true"
+      YARN_CONF_yarn_resourcemanager_store_class: "org.apache.hadoop.yarn.server.resourcemanager.recovery.FileSystemRMStateStore"
+      YARN_CONF_yarn_resourcemanager_scheduler_class: "org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler"
+      YARN_CONF_yarn_scheduler_capacity_root_default_maximum___allocation___mb: "8192"
+      YARN_CONF_yarn_scheduler_capacity_root_default_maximum___allocation___vcores: "4"
+      YARN_CONF_yarn_resourcemanager_fs_state___store_uri: "/rmstate"
+    depends_on:
+      - namenode
+      - datanode
+      - resourcemanager
+
+  airflow-webserver:
+    <<: *airflow-common
+    entrypoint:
+      - /bin/bash
+      - -c
+      - 'chown -R airflow:root /opt/airflow/{logs,plugins,data} && exec /entrypoint "webserver"'
+    ports:
+      - "8080:8080"
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+
+  airflow-scheduler:
+    <<: *airflow-common
+    entrypoint:
+      - /bin/bash
+      - -c
+      - 'chown -R airflow:root /opt/airflow/{logs,plugins,data} && exec /entrypoint "scheduler"'
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        chown -R airflow:root /opt/airflow/{logs,plugins,data}
+        exec /entrypoint "bash" "-c" "airflow db migrate && airflow users create --username ${AIRFLOW_ADMIN_USER} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL}"
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    container_name: airflow-streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data:ro
+    restart: always
+
+volumes:
+  postgres-db-volume:
+  sqlserver-data:
+  hadoop-namenode:
+  hadoop-datanode:

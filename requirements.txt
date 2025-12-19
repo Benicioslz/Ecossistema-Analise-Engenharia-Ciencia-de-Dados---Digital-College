@@ -1,0 +1,12 @@
+pyodbc
+pandas
+numpy
+openpyxl
+xlsxwriter
+fastparquet
+pyarrow
+scikit-learn
+joblib
+streamlit
+dill
+hdfs>=2.7.0

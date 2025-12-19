@@ -1,0 +1,23 @@
+# Estágio 1: Imagem base oficial do Python
+FROM python:3.10-slim
+
+# Estágio 2: Configuração do ambiente
+WORKDIR /app
+
+# Copia o arquivo de dependências
+COPY requirements.txt .
+
+# Instala as dependências
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copia a pasta de dados com os modelos para dentro da imagem
+COPY data/ ./data/
+
+# Copia o script do dashboard para dentro da imagem
+COPY dashboard.py .
+
+# Expõe a porta que o Streamlit vai usar
+EXPOSE 8501
+
+# Comando para iniciar a aplicação quando o container rodar
+CMD ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]

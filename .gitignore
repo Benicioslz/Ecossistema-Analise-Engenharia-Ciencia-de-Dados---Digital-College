@@ -1,0 +1,21 @@
+# Docker / Logs / Dados
+logs/
+.env
+*.log
+plugins/
+data/
+venv/
+
+# Python
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Airflow
+dags/logs/
+
+
+*.joblib
+*.pkl
+data/models/
