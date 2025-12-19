@@ -240,7 +240,9 @@ Este projeto está sob a licença MIT. Veja o arquivo LICENSE para detalhes.
 
 ## 👥 Autores
 
-- **Israel** - Desenvolvimento inicial
+- **Israel** -
+- **Christian**-
+- **JoaoPedro**-
 
 ## 🙏 Agradecimentos
 
